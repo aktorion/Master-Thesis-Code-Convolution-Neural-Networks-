@@ -1,0 +1,134 @@
+import numpy as np
+from keras import backend as K
+from keras.optimizers import SGD,Adam,Adagrad
+from keras.preprocessing import image as image_lib
+from keras.models import Sequential
+from keras.layers import Dropout, Flatten, Dense, Activation, Conv2D, GlobalAveragePooling2D
+from keras.layers import MaxPooling2D
+from keras import applications
+from keras import initializers
+import cv2
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+from keras.callbacks import Callback
+from keras.callbacks import EarlyStopping
+import imageio
+import glob
+
+#Create the dataset to be loaded in the model
+src=r'C:\Users\aktorion\Desktop\Master\Master Ergasia\breast-histopathology-images\data1'+'\\'
+
+img_size = 50 # dimensions of our images.
+
+input_shape = (img_size, img_size, 3) #expected input size of our images
+
+early_stopping = EarlyStopping(monitor='loss', patience=30)# stop after 15 worst results than best
+
+#read images from files to matrices
+def readImages(src,class_number,X_data=[],X_labels=[],start=0,end=-1,image_size = img_size):
+    listOfFiles = os.listdir(src+'\\'+str(class_number)+'\\')
+    if(end==-1):
+        end=len(listOfFiles)
+        
+    for myFile in listOfFiles[start:end]:
+        image = cv2.imread(src+'\\'+str(class_number)+'\\'+myFile).astype(np.float32)
+        
+        image = cv2.resize(image, (image_size, image_size), interpolation = cv2.INTER_CUBIC) 
+        #center the luminosity
+
+        image[:,:,0] -= 103.939
+        image[:,:,1] -= 116.779
+        image[:,:,2] -= 123.68
+        image = image_lib.img_to_array(image)
+        image.reshape((1,) + image.shape)
+        X_data.append(image)
+        X_labels.append(class_number)
+
+def recall(y_true, y_pred):
+     true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+     possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+     recall = true_positives / (possible_positives + K.epsilon())
+     return recall
+
+def precision(y_true, y_pred):
+    true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+    predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
+    precision = true_positives / (predicted_positives + K.epsilon())
+    return precision
+
+class TestCallback(Callback):
+    def __init__(self, test_data_X, test_data_X_labels):
+        self.test_data_X = test_data_X
+        self.test_data_X_labels = test_data_X_labels
+        
+
+    def on_epoch_end(self, epoch, logs={}):
+        x = self.test_data_X
+        y = self.test_data_X_labels
+        results = self.model.evaluate(x, y, verbose=0)
+        loss, acc=results[0],results[1]
+        print('\nTesting loss: {}, acc: {}\n'.format(loss, acc))
+
+class WeightsSaver(Callback):
+    def __init__(self, model, N=1):
+        self.model = model
+        self.N = N
+        self.epoch = 1
+
+    def on_epoch_end(self, epoch, logs={}):
+        if self.epoch % self.N == 0:
+            name = 'script1model6_50try02%05d.h5' % self.epoch
+            self.model.save_weights(src + name)
+        self.epoch += 1
+
+
+#We remove the last 8 layers of the convolutional network
+oldModel = applications.VGG16(include_top=False, weights='imagenet', input_shape=(img_size,img_size,3))
+for i in range(8):
+    oldModel.layers.pop()
+
+#we add the fully connected layer
+model = Sequential()
+for layer in oldModel.layers:
+    model.add(layer)
+model.add(Flatten())
+model.add(Dense(300,kernel_initializer=initializers.RandomNormal(mean=0, stddev=0.01), bias_initializer='zeros'))
+model.add(Dense(300,kernel_initializer=initializers.RandomNormal(mean=0, stddev=0.01), bias_initializer='zeros'))
+model.add(Dense(1, activation='sigmoid', kernel_initializer=initializers.RandomNormal(mean=0, stddev=0.01), bias_initializer='zeros'))
+
+model.load_weights("script1model5_50try0200298.h5")
+
+#We train only the convolutional layers
+for layer in model.layers[-3:]:
+    layer.trainable = False
+
+X_train_labels = []
+X_train_data = []
+readImages(src+'train',0,X_train_data,X_train_labels)
+readImages(src+'train',1,X_train_data,X_train_labels)
+
+X_validation_labels = []
+X_validation_data = []
+readImages(src+'validation',0,X_validation_data,X_validation_labels)
+readImages(src+'validation',1,X_validation_data,X_validation_labels)
+
+X_train_labels = np.asarray(X_train_labels)
+X_train_data = np.asarray(X_train_data)
+
+X_validation_labels = np.asarray(X_validation_labels)
+X_validation_data = np.asarray(X_validation_data)
+
+
+model.compile(optimizer=SGD(lr=0.00001, momentum=0.3, decay=0.000001, nesterov=True   ),
+              loss='binary_crossentropy',
+              metrics=['accuracy'])
+
+model.fit(X_train_data, X_train_labels,
+          epochs=200,
+          batch_size=150,
+          #validation_data=(np.array(X_validation_data), np.array(X_validation_labels)),
+          shuffle=True,
+          callbacks=[WeightsSaver(model, 1),
+                     early_stopping
+                     ])
+        
